@@ -747,14 +747,18 @@ func TestEndorsementOnProposalResponderViewInternal(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty demonstrates that
-// collectEndorsementsView.Call rejects a cryptographically-valid endorsement from an
-// identity that is NOT bound to the expected party. `found` is now initialized to
-// `false` before the IsBoundTo check (endorsement.go), so the final
-// `if !found { return error }` guard correctly rejects a response whose signer is
-// neither the contacted party nor bound to it.
-func TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty(t *testing.T) {
-	t.Parallel()
+// collectFixture is a collectEndorsementsView that asks "bob" to endorse a tx whose
+// results are "results". bob's reply is pushed on msgCh, and tm parses each response.
+type collectFixture struct {
+	ctx   *mock.Context
+	tx    *mock.Transaction
+	tm    *mock.TransactionManager
+	msgCh chan *view.Message
+	view  *collectEndorsementsView
+}
+
+func newCollectFixture(t *testing.T) *collectFixture {
+	t.Helper()
 	fakeCtx := &mock.Context{}
 	fakeSP := &mock.Provider{}
 	fakeCtx.GetServiceCalls(func(v any) (any, error) {
@@ -764,7 +768,6 @@ func TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty(t *testing.T
 	fakeTx := &mock.Transaction{}
 	fakeTx.ChannelReturns("ch1")
 	fakeTx.NetworkReturns("net1")
-
 	fakeRWS := &mock.RWSet{}
 	fakeRWS.BytesReturns([]byte("results"), nil)
 	fakeTx.GetRWSetReturns(fakeRWS, nil)
@@ -776,26 +779,18 @@ func TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty(t *testing.T
 	fakeCH := &mock.Channel{}
 	fakeCH.NameReturns("ch1")
 	fakeFNS.ChannelReturns(fakeCH, nil)
-
-	fakeCM := &mock.ChannelMembership{}
-	fakeCH.ChannelMembershipReturns(fakeCM)
-
 	fakeTM := &mock.TransactionManager{}
 	fakeFNS.TransactionManagerReturns(fakeTM)
 
 	fakeFNSP := &mock.FabricNetworkServiceProvider{}
 	fakeFNSP.FabricNetworkServiceReturns(fakeFNS, nil)
 	fakeNSP := fabric.NewNetworkServiceProvider(fakeFNSP, nil)
-
-	// A real endpoint.Service backed by a BindingStore that reports the endorser
-	// identity is NOT bound to the party we asked to endorse.
-	fakeBindingStore := &mock.BindingStore{}
-	fakeBindingStore.HaveSameBindingReturns(false, nil)
-	endpointService, _ := endpoint.NewService(fakeBindingStore)
+	// The zero-value BindingStore reports no identity bound to another.
+	endpointService, err := endpoint.NewService(&mock.BindingStore{})
+	require.NoError(t, err)
 
 	networkServiceProviderType := reflect.TypeFor[*fabric.NetworkServiceProvider]()
 	endpointServiceType := reflect.TypeFor[*endpoint.Service]()
-
 	fakeSP.GetServiceCalls(func(v any) (any, error) {
 		if v == networkServiceProviderType {
 			return fakeNSP, nil
@@ -807,13 +802,7 @@ func TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty(t *testing.T
 	})
 
 	fns := fabric.NewNetworkService(nil, fakeFNS, "net1")
-	ft := fabric.NewTransaction(fns, fakeTx)
-	et := &Transaction{
-		Transaction: ft,
-	}
-
-	party := view.Identity("expected-party")
-	ev := NewCollectEndorsementsView(et, party)
+	et := &Transaction{Transaction: fabric.NewTransaction(fns, fakeTx)}
 
 	fakeCtx.IsMeReturns(false)
 	fakeSession := &mock.Session{}
@@ -821,27 +810,73 @@ func TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty(t *testing.T
 	msgCh := make(chan *view.Message, 1)
 	fakeSession.ReceiveReturns(msgCh)
 
-	// The response is endorsed by "attacker", a completely different identity than
-	// "expected-party", and the binding store confirms they are not bound together.
+	return &collectFixture{ctx: fakeCtx, tx: fakeTx, tm: fakeTM, msgCh: msgCh, view: NewCollectEndorsementsView(et, []byte("bob"))}
+}
+
+// reply pushes bob's reply carrying responses.
+func (f *collectFixture) reply(t *testing.T, responses ...[]byte) {
+	t.Helper()
+	if responses == nil {
+		responses = [][]byte{}
+	}
+	payload, err := json.Marshal(responses)
+	require.NoError(t, err)
+	f.msgCh <- &view.Message{Payload: payload}
+}
+
+// TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty checks that a validly
+// signed endorsement from an identity that is neither the contacted party nor bound to
+// it is rejected: signature verification only proves who signed, not that the signer is
+// the party asked.
+func TestCollectEndorsementsView_RejectsEndorsementFromUnboundParty(t *testing.T) {
+	t.Parallel()
+	f := newCollectFixture(t)
 	resp := &mock.ProposalResponse{}
 	resp.EndorserReturns([]byte("attacker"))
 	resp.ResultsReturns([]byte("results"))
-	// VerifyEndorsement succeeds unconditionally here: in a real deployment this
-	// would succeed whenever "attacker" is any validly-enrolled MSP member, since
-	// verification only checks the signature was produced by whoever `Endorser()`
-	// claims to be - it says nothing about whether that signer is `party`.
 	resp.VerifyEndorsementReturns(nil)
-	fakeTM.NewProposalResponseFromBytesReturns(resp, nil)
+	f.tm.NewProposalResponseFromBytesReturns(resp, nil)
+	f.reply(t, []byte("resp-from-attacker"))
 
-	payload, _ := json.Marshal([][]byte{[]byte("resp-from-attacker")})
-	msgCh <- &view.Message{Payload: payload}
+	_, err := f.view.Call(f.ctx)
+	require.ErrorContains(t, err, "invalid endorsement, expected one signed by")
+}
 
-	_, err := ev.Call(fakeCtx)
+func TestCollectEndorsementsView_RejectsDifferentResults(t *testing.T) {
+	t.Parallel()
+	f := newCollectFixture(t)
+	// bob signs validly, but over results other than the ones the tx holds.
+	resp := &mock.ProposalResponse{}
+	resp.EndorserReturns([]byte("bob"))
+	resp.ResultsReturns([]byte("other"))
+	resp.VerifyEndorsementReturns(nil)
+	f.tm.NewProposalResponseFromBytesReturns(resp, nil)
+	f.reply(t, []byte("resp"))
 
-	// The overall Call must fail because the endorser is neither the contacted
-	// party nor bound to it, even though the individual response passed signature
-	// verification and was provisionally appended before the post-loop binding check.
-	require.ErrorContains(t, err, "invalid endorsement, expected one signed by", "endorsement from an unbound identity must be rejected")
+	_, err := f.view.Call(f.ctx)
+	require.ErrorContains(t, err, "received different results")
+	require.Zero(t, f.tx.AppendProposalResponseCallCount())
+}
+
+func TestCollectEndorsementsView_RejectsEmptyResponse(t *testing.T) {
+	t.Parallel()
+	f := newCollectFixture(t)
+	f.reply(t)
+
+	_, err := f.view.Call(f.ctx)
+	require.ErrorContains(t, err, "invalid endorsement, expected one signed by")
+	require.Zero(t, f.tx.AppendProposalResponseCallCount())
+}
+
+func TestCollectEndorsementsView_RejectsGarbledResponse(t *testing.T) {
+	t.Parallel()
+	f := newCollectFixture(t)
+	f.tm.NewProposalResponseFromBytesReturns(nil, errors.New("garbled"))
+	f.reply(t, []byte("garbled"))
+
+	_, err := f.view.Call(f.ctx)
+	require.ErrorContains(t, err, "failed unmarshalling received proposal response")
+	require.Zero(t, f.tx.AppendProposalResponseCallCount())
 }
 
 func TestVerifierProviderWrapper(t *testing.T) {
