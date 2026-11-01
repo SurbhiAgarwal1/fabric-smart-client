@@ -225,6 +225,20 @@ func TestCachedStoreSetStatusesUpdatesCache(t *testing.T) {
 	}
 }
 
+func TestCachedStoreSetStatusesBusyRereadsBacked(t *testing.T) {
+	t.Parallel()
+	backed := newMockVaultStore()
+	s := newCachedTestStore(backed)
+	s.cache.Put("tx1", &entry{Code: driver.Valid})
+
+	require.NoError(t, s.SetStatuses(t.Context(), driver.Busy, "", "tx1"))
+
+	before := backed.getCalls.Load()
+	_, err := s.GetTxStatus(t.Context(), "tx1")
+	require.NoError(t, err)
+	require.Equal(t, before+1, backed.getCalls.Load())
+}
+
 func TestCachedStoreSetStatusesPropagatesError(t *testing.T) {
 	t.Parallel()
 	backed := newMockVaultStore()
