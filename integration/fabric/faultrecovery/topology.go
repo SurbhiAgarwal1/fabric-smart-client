@@ -32,8 +32,13 @@ var Orderers = []string{"orderer", "orderer2", "orderer3"}
 // BFT broadcaster accepts, and tolerates one faulty orderer.
 var BFTOrderers = []string{"orderer", "orderer2", "orderer3", "orderer4"}
 
-// Topology returns two peers (Org1, Org2), three raft orderers, and the FSC nodes of
-// faultrecovery.FSCTopology, running sdk, on Postgres databases with the given prefix.
+// Org2Peers names the two peers of Org2, bob's organization, so a spec can stop the one
+// bob's delivery uses and keep the other.
+var Org2Peers = []string{"Org2_peer_0", "Org2_peer_1"}
+
+// Topology returns one peer of Org1, the two peers of Org2 in Org2Peers, three raft
+// orderers, and the FSC nodes of faultrecovery.FSCTopology, running sdk, on Postgres
+// databases with the given prefix.
 func Topology(dbPrefix string, sdk node.SDK) []api.Topology {
 	return []api.Topology{fabricTopology(), faultrecovery.FSCTopology(sdk, dbPrefix)}
 }
@@ -62,7 +67,8 @@ func fabricTopology() *topology.Topology {
 // fabricTopologyOn returns the peers and namespace of Topology with the given orderers.
 func fabricTopologyOn(orderers []string) *topology.Topology {
 	fabricTopology := fabric.NewDefaultTopology()
-	fabricTopology.AddOrganizationsByName("Org1", "Org2")
+	fabricTopology.AddOrganizationsByName("Org1")
+	fabricTopology.AddOrganization("Org2").AddPeer(Org2Peers[0]).AddPeer(Org2Peers[1])
 	fabricTopology.SetNamespaceApproverOrgs("Org1")
 	fabricTopology.AddNamespace(views.Namespace, topology.Unanimity("Org1"))
 	fabricTopology.Orderers = nil
