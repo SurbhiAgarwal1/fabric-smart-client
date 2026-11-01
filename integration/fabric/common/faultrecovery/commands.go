@@ -124,6 +124,14 @@ func Order(ii *integration.Infrastructure, tx *views.Endorsed) string {
 	return common.JSONUnmarshalString(callView(ii, "alice", "order", &views.Order{Tx: tx.Tx}))
 }
 
+// EndorseLiar runs alice's endorseLiar view with bob as responder and returns how
+// alice rejected bob's endorsement. The view fails when alice accepts it.
+func EndorseLiar(ii *integration.Infrastructure, value int) *views.Rejected {
+	res := &views.Rejected{}
+	common.JSONUnmarshal(callView(ii, "alice", "endorseLiar", &views.Submit{Value: value, Responder: ii.Identity("bob")}).([]byte), res)
+	return res
+}
+
 // EndorseEventually is Endorse for a responder whose connection is failing over, such as
 // a replicated node whose replica holding alice's connection died: an attempt that goes
 // out before alice sees the connection close fails within SessionCloseTimeout, so the

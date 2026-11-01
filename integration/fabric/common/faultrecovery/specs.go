@@ -298,3 +298,25 @@ func DependencySpecs(s *integration.TestSuite, dbPrefix string) {
 		gomega.Expect(SubmitAndWaitFinal(s.II, 1)).To(gomega.HaveLen(1))
 	})
 }
+
+// HostileSpecs registers the hostile counterparty specs for the suite s. Each spec
+// leaves the network healthy, so the specs can run under ShareNetwork.
+func HostileSpecs(s *integration.TestSuite) {
+	ginkgo.It("rejects an endorsement over a changed read-write set", func() {
+		rejected := EndorseLiar(s.II, 1)
+		gomega.Expect(rejected.TxID).NotTo(gomega.BeEmpty())
+		gomega.Expect(rejected.Responder).To(gomega.Equal("bob"))
+		gomega.Expect(rejected.Reason).To(gomega.ContainSubstring("received different results"))
+
+		// Both nodes opened the transaction's read-write set, which on Fabric marks it Busy
+		// in their vaults; on Fabric-x, where status reads the committer, it is Unknown.
+		// Neither node may report it Valid or Invalid, since it was never ordered.
+		for _, node := range []string{"alice", "bob"} {
+			res, err := Query(s.II, node, rejected.TxID)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res.Status).To(gomega.Or(gomega.Equal(fdriver.Unknown), gomega.Equal(fdriver.Busy)), "status on [%s]", node)
+		}
+
+		gomega.Expect(SubmitAndWaitFinal(s.II, 1)).To(gomega.HaveLen(1))
+	})
+}
